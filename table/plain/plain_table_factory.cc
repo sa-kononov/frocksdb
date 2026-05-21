@@ -213,6 +213,18 @@ static int RegisterBuiltinMemTableRepFactory(ObjectLibrary& library,
         *errmsg = "cuckoo hash memtable is not supported anymore.";
         return nullptr;
       });
+#ifdef HAS_CSPP_MEMTABLE
+  // CSPP (Patricia trie) memtable, ported from ToplingDB. Selectable from
+  // OPTIONS files as memtable_factory="CSPPMemTab" or the nickname "cspp".
+  library.AddFactory<MemTableRepFactory>(
+      ObjectLibrary::PatternEntry("CSPPMemTab", true).AnotherName("cspp"),
+      [](const std::string& /*uri*/,
+         std::unique_ptr<MemTableRepFactory>* guard,
+         std::string* /*errmsg*/) {
+        guard->reset(NewCSPPMemTableRepFactory());
+        return guard->get();
+      });
+#endif
 
   size_t num_types;
   return static_cast<int>(library.GetFactoryCount(&num_types));

@@ -63,7 +63,9 @@ DEFINE_string(memtablerep, "skiplist",
               "\tvector              -- backed by an std::vector\n"
               "\thashskiplist        -- backed by a hash skip list\n"
               "\thashlinklist        -- backed by a hash linked list\n"
-              "\tcuckoo              -- backed by a cuckoo hash table");
+              "\tcuckoo              -- backed by a cuckoo hash table\n"
+              "\tcspp                -- backed by a CSPP Patricia trie "
+              "(requires make WITH_CSPP_MEMTABLE=1)");
 
 DEFINE_int64(bucket_count, 1000000,
              "bucket_count parameter to pass into NewHashSkiplistRepFactory or "
@@ -596,6 +598,19 @@ int main(int argc, char** argv) {
         FLAGS_if_log_bucket_dist_when_flash, FLAGS_threshold_use_skiplist));
     options.prefix_extractor.reset(
         ROCKSDB_NAMESPACE::NewFixedPrefixTransform(FLAGS_prefix_length));
+#ifdef HAS_CSPP_MEMTABLE
+  } else if (FLAGS_memtablerep == "cspp") {
+    // CSPP's mempool is a hard virtual-address ceiling. Size it from the
+    // bench's planned working set (num_operations × per-entry footprint)
+    // with 4x headroom so inserts don't silently drop; VA reservation is
+    // cheap so favour overshoot.
+    const size_t per_entry =
+        static_cast<size_t>(FLAGS_item_size) + 16 /*ikey*/ + 64 /*overhead*/;
+    const size_t cap = std::max<size_t>(
+        2ull << 20 /*CSPP minimum chunk*/,
+        4 * per_entry * static_cast<size_t>(FLAGS_num_operations));
+    factory.reset(ROCKSDB_NAMESPACE::NewCSPPMemTableRepFactory(cap));
+#endif
   } else {
     ROCKSDB_NAMESPACE::ConfigOptions config_options;
     config_options.ignore_unsupported_options = false;

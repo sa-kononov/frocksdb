@@ -1,0 +1,750 @@
+#include "fstring.hpp"
+#include <ostream>
+#include <limits>
+#include <ctype.h>
+
+#if defined(_MSC_VER)
+#include <boost/algorithm/searching/boyer_moore_horspool.hpp>
+#endif
+
+namespace terark {
+
+template<class Char>
+std::string basic_fstring<Char>::hex() const noexcept {
+	constexpr ptrdiff_t nHexPerCH = 2 * sizeof(Char);
+	std::string res;
+	res.resize(nHexPerCH * n);
+	char* buf = &res[0];
+	static const char hexTab[] = "0123456789ABCDEF";
+	for(ptrdiff_t i = 0; i < n; i++) {
+		uc_t uc = p[i];
+		for (ptrdiff_t j = 0; j < nHexPerCH; j++)
+			buf[nHexPerCH*i + j] = hexTab[uc >> 4*(nHexPerCH-1-j) & 15];
+	}
+	return res;
+}
+
+//template std::string basic_fstring<char>::hex() const noexcept;
+//template std::string basic_fstring<uint16_t>::hex() const noexcept;
+
+std::string operator+(fstring x, fstring y) {
+	std::string z;
+	z.reserve(x.n + y.n);
+	z.append(x.p, x.n);
+	z.append(y.p, y.n);
+	return z;
+}
+
+std::ostream& operator<<(std::ostream& os, fstring x) {
+	os.write(x.data(), x.size());
+	return os;
+}
+
+// fstring16
+
+bool operator==(fstring16 x, fstring16 y) {
+	if (x.n != y.n) return false;
+	return memcmp(x.p, y.p, 2*x.n) == 0;
+}
+bool operator!=(fstring16 x, fstring16 y) { return !(x == y); }
+
+bool operator<(fstring16 x, fstring16 y) {
+	ptrdiff_t n = std::min(x.n, y.n);
+	int ret = 0;
+	for (ptrdiff_t i = 0; i < n; ++i) {
+		uint16_t cx = x.p[i];
+		uint16_t cy = y.p[i];
+		if (cx != cy) {
+			if (sizeof(int) > 2)
+				ret = int(cx) - int(cy);
+			else if (cx < cy)
+				ret = -1;
+			else
+				ret = 1;
+			break;
+		}
+	}
+	if (ret)
+		return ret < 0;
+	else
+		return x.n < y.n;
+}
+bool operator> (fstring16 x, fstring16 y) { return   y < x ; }
+bool operator<=(fstring16 x, fstring16 y) { return !(y < x); }
+bool operator>=(fstring16 x, fstring16 y) { return !(x < y); }
+
+TERARK_DLL_EXPORT fstring var_symbol(const char* s) {
+  const char* e = s;
+  while (*e && ('_' == *e || isalnum((unsigned char)*e))) e++;
+  return fstring(s, e);
+}
+
+#ifdef _MSC_VER
+// boost 1.62- returns const Char*
+// boost 1.63+ returns std::pair<const Char*, const Char*>
+// make the brain dead boost happy
+template<class Iter>
+static inline
+const Iter fuck_boost(std::pair<Iter,Iter> p) { return p.first; }
+template<class Iter>
+static inline
+const Iter fuck_boost(Iter p) { return p; }
+
+TERARK_DLL_EXPORT
+char*
+terark_fstrstr(const char* haystack, size_t haystack_len
+			 , const char* needle, size_t needle_len)
+{
+	const char* hay_end = haystack + haystack_len;
+	const char* needle_end = needle + needle_len;
+	const char* q = fuck_boost(boost::algorithm::boyer_moore_horspool_search(
+		haystack, hay_end, needle, needle_end));
+	if (q == hay_end)
+		return NULL;
+	else
+		return (char*)(q);
+}
+#endif
+
+uint16_t*
+terark_fstrstr(const uint16_t* haystack, size_t haystack_len
+		   , const uint16_t* needle  , size_t needle_len)
+{
+#if defined(_MSC_VER)
+	const uint16_t* hay_end = haystack + haystack_len;
+	const uint16_t* needle_end = needle + needle_len;
+	const uint16_t* q = fuck_boost(boost::algorithm::boyer_moore_horspool_search(
+		haystack, hay_end, needle, needle_end));
+	if (q == needle_end)
+		return NULL;
+	else
+		return (uint16_t*)(q);
+#else
+	char*  hit = (char*)(haystack);
+	char*  end = (char*)(haystack + haystack_len);
+	ptrdiff_t needle_len2 = needle_len * 2;
+	while (end - hit  >= needle_len2) {
+		hit = (char*)memmem(hit, end - hit, needle, needle_len2);
+		if (NULL == hit || (hit - (char*)haystack) % 2 == 0)
+			return (uint16_t*)hit;
+		hit++;
+	}
+#endif
+	return NULL;
+}
+
+unsigned char gtab_ascii_tolower[256] = {
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+	0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+	0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+	0x40, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+	0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F,
+	0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+	0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+	0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+	0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+	0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+	0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+	0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+	0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+	0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
+	0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+};
+
+unsigned char gtab_ascii_toupper[256] = {
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+	0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+	0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+	0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+	0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F,
+	0x60, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+	0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+	0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+	0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+	0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+	0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+	0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+	0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+	0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
+	0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+};
+
+template<>
+basic_fstring<char>& basic_fstring<char>::chomp() {
+	while (n && isspace((unsigned char)(p[n-1]))) n--;
+	return *this;
+}
+template<>
+basic_fstring<uint16_t>& basic_fstring<uint16_t>::chomp() {
+	while (n && iswspace(p[n-1])) n--;
+	return *this;
+}
+
+template<>
+basic_fstring<char>& basic_fstring<char>::trim() {
+	while (n && isspace((unsigned char)(p[n-1]))) n--;
+	while (n && isspace((unsigned char)(*p))) p++, n--;
+	return *this;
+}
+template<>
+basic_fstring<uint16_t>& basic_fstring<uint16_t>::trim() {
+	while (n && iswspace(p[n-1])) n--;
+	while (n && iswspace(*p)) p++, n--;
+	return *this;
+}
+
+template struct basic_fstring<char>;
+template struct basic_fstring<uint16_t>;
+
+bool getEnvBool(const char* envName, bool Default) noexcept {
+	if (const char* env = getenv(envName)) {
+		if (isdigit(env[0])) {
+			return atoi(env) != 0;
+		}
+#if defined(_MSC_VER)
+		#define strcasecmp stricmp
+		#define strncasecmp strnicmp
+#endif
+		if (strcasecmp(env, "true") == 0)
+			return true;
+		if (strcasecmp(env, "false") == 0)
+			return false;
+		if (strcasecmp(env, "on" ) == 0) return true;
+		if (strcasecmp(env, "off") == 0) return false;
+		if (strcasecmp(env, "yes") == 0) return true;
+		if (strcasecmp(env, "no" ) == 0) return false;
+		fprintf(stderr
+			, "WARN: terark::getEnvBool(\"%s\") = \"%s\" is invalid, treat as Default = %s\n"
+			, envName, env, Default?"true":"false"
+		);
+	}
+	return Default;
+}
+
+bool parseBooleanRelaxed(const char* str, bool Default) noexcept {
+	if (NULL == str || '\0' == *str) {
+		return Default;
+	}
+	while (isspace((unsigned char)*str)) {
+		++str;
+	}
+	if (isdigit((unsigned char)str[0])) {
+		return str[0] != '0';
+	}
+	size_t len = 0;
+	while (str[len] && isalpha((unsigned char)str[len])) {
+		++len;
+	}
+	auto strcasecmp = [len](const char* s1, const char* s2) {
+		if (strlen(s2) != len)
+			return 1; // not equal, don't care greater or less
+		return strncasecmp(s1, s2, len);
+	};
+	if (strcasecmp(str, "true") == 0)
+		return true;
+	if (strcasecmp(str, "false") == 0)
+		return false;
+	if (strcasecmp(str, "on" ) == 0) return true;
+	if (strcasecmp(str, "off") == 0) return false;
+	if (strcasecmp(str, "yes") == 0) return true;
+	if (strcasecmp(str, "no" ) == 0) return false;
+	fprintf(stderr
+		, "WARN: terark::parseBooleanRelaxed(\"%s\") fail, use Default = %s\n"
+		, str, Default?"true":"false"
+	);
+	return Default;
+}
+
+bool parseBooleanRelaxed(fstring str, bool Default) noexcept {
+	if (str.empty()) {
+		return Default;
+	}
+	while (isspace((unsigned char)str[0])) {
+		str.p++;
+		str.n--;
+	}
+	if (isdigit(str[0])) {
+		return str[0] != '0';
+	}
+	auto strcasecmp = [str](const char* s2) {
+		if (strlen(s2) != str.size())
+			return 1; // not equal, don't care greater or less
+		return strncasecmp(str.data(), s2, str.size());
+	};
+	if (strcasecmp("true") == 0)
+		return true;
+	if (strcasecmp("false") == 0)
+		return false;
+	if (strcasecmp("on" ) == 0) return true;
+	if (strcasecmp("off") == 0) return false;
+	if (strcasecmp("yes") == 0) return true;
+	if (strcasecmp("no" ) == 0) return false;
+	fprintf(stderr
+		, "WARN: terark::parseBooleanRelaxed(\"%.*s\") fail, use Default = %s\n"
+		, str.ilen(), str.data(), Default?"true":"false"
+	);
+	return Default;
+}
+
+long getEnvLong(const char* envName, long Default) noexcept {
+	if (const char* env = getenv(envName)) {
+		int base = 0; // env can be oct, dec, hex
+		return strtol(env, NULL, base);
+	}
+	return Default;
+}
+
+double getEnvDouble(const char* envName, double Default) noexcept {
+  if (const char* env = getenv(envName)) {
+    return strtof(env, NULL);
+  }
+  return Default;
+}
+
+const char* getEnvStr(const char* envName, const char* Default) {
+  if (auto value = getenv(envName)) {
+    return value;
+  }
+  else if (nullptr == Default) {
+    // nullptr indicate envName must be defined
+    THROW_STD(invalid_argument, "missing env var: %s", envName);
+  }
+  else
+    return Default;
+}
+
+unsigned long long ParseSizeXiB(const char* str) noexcept {
+	if (NULL == str || '\0' == *str) {
+		return 0;
+	}
+    char* endp = NULL;
+    double val = strtod(str, &endp);
+    char scale = *endp;
+    return ScaleSizeXiB(val, scale);
+}
+unsigned long long ParseSizeXiB(fstring str) noexcept {
+    return ParseSizeXiB(str.c_str());
+}
+unsigned long long ParseSizeXiB(const char* str, const char* Default) noexcept {
+	if (str) {
+		char* endp = NULL;
+		double val = strtod(str, &endp);
+		if (endp != str)
+			return ScaleSizeXiB(val, *endp);
+	}
+	return ParseSizeXiB(Default);
+}
+unsigned long long ParseSizeXiB(const char* str, unsigned long long Default) noexcept {
+	if (str) {
+		char* endp = NULL;
+		double val = strtod(str, &endp);
+		if (endp != str)
+			return ScaleSizeXiB(val, *endp);
+	}
+	return Default;
+}
+unsigned long long ScaleSizeXiB(double val, char scale) noexcept {
+    if ('k' == scale || 'K' == scale)
+        return uint64_t(val * (1ull << 10));
+    else if ('m' == scale || 'M' == scale)
+        return uint64_t(val * (1ull << 20));
+    else if ('g' == scale || 'G' == scale)
+        return uint64_t(val * (1ull << 30));
+    else if ('t' == scale || 'T' == scale)
+        return uint64_t(val * (1ull << 40));
+    else if ('p' == scale || 'P' == scale)
+        return uint64_t(val * (1ull << 50));
+    else
+        return uint64_t(val);
+}
+
+// if quote == ("), escape (") as (\")
+// if quote == ('), escape (') as (\')
+// otherwise do not escape (') and (")
+template<bool VerbatimNonAscii, class PushBack>
+void escape_append_imp(fstring str, char quote, PushBack push_back) {
+	for(size_t  i = 0; i < size_t(str.n); ++i) {
+		byte_t  c = str.p[i];
+		switch (c) {
+		default:
+			if (c >= 0x20 && c <= 0x7E) { // isprint for ascii
+				push_back(c);
+			}
+			else if (VerbatimNonAscii && c > 0x7F) { // 127 is DEL non-print
+				push_back(c);
+			}
+			else {
+				const char* hex = "0123456789ABCDEF";
+				push_back('\\');
+				push_back('x');
+				push_back(hex[c >> 4]);
+				push_back(hex[c & 15]);
+			}
+			break;
+		case '\\': // 0x27
+			push_back('\\');
+			push_back('\\');
+			break;
+		case '"': // 0x22
+			if ('"' == quote)
+				push_back('\\');
+			push_back(c);
+			break;
+		case '\'': // 0x5C
+			if ('\'' == quote)
+				push_back('\\');
+			push_back(c);
+			break;
+		case '\0':  push_back('\\'); push_back('0'); break; // 00
+		case '\a':  push_back('\\'); push_back('a'); break; // 07
+		case '\b':  push_back('\\'); push_back('b'); break; // 08
+		case '\f':  push_back('\\'); push_back('f'); break; // 0C
+		case '\n':  push_back('\\'); push_back('n'); break; // 0A
+		case '\r':  push_back('\\'); push_back('r'); break; // 0D
+		case '\t':  push_back('\\'); push_back('t'); break; // 09
+		case '\v':  push_back('\\'); push_back('v'); break; // 0B
+		}
+	}
+}
+
+template<bool VerbatimNonAscii>
+void escape_append_aux(fstring str, std::string* res, char quote) {
+	size_t esclen = 0;
+	escape_append_imp<VerbatimNonAscii>(str, quote, [&esclen](byte_t) { esclen++; });
+	size_t oldsize = res->size();
+	res->resize(oldsize + esclen);
+	char* p = &*res->begin() + oldsize;
+	escape_append_imp<VerbatimNonAscii>(str, quote, [&p](byte_t c) { *p++ = char(c); });
+	assert(&*res->begin() + res->size() == p);
+}
+
+void escape_append(fstring str, std::string* res, char quote) {
+	escape_append_aux<false>(str, res, quote);
+}
+
+std::string escape(fstring str, char quote) {
+	std::string res;
+	escape_append(str, &res, quote);
+	return res;
+}
+
+void c_escape_append(fstring str, std::string* res, char quote) {
+	escape_append_aux<true>(str, res, quote);
+}
+std::string c_escape(fstring str, char quote) {
+	std::string res;
+	c_escape_append(str, &res, quote);
+	return res;
+}
+
+/// @param on_bad_pos(pos) return true to ignore the bad escape seq
+template<class DestChar>
+static size_t
+unescape_may_inplace_tpl(DestChar* dest, const byte_t* src, size_t len,
+						 std::function<bool(size_t)> on_bad_pos) {
+	DestChar* dest_begin = dest;
+	const byte_t* src_begin = src;
+	const byte_t* src_end = src + len;
+	while (src < src_end) {
+		DestChar unescaped;
+		const auto save = src;
+		if (terark_unlikely(*src == '\\')) {
+			++src;
+			switch (*src) {
+			case 'b':   unescaped = '\b';   ++src; break;
+			case 't':   unescaped = '\t';   ++src; break;
+			case 'n':   unescaped = '\n';   ++src; break;
+			case 'f':   unescaped = '\f';   ++src; break;
+			case 'r':   unescaped = '\r';   ++src; break;
+			case '"':   unescaped = '"';    ++src; break;
+			case '\'':  unescaped = '\'';   ++src; break;
+			case '\\':  unescaped = '\\';   ++src; break;
+			case 'x': case 'X':
+				{
+					DestChar hex = 0;
+					DestChar const lim = std::numeric_limits<DestChar>::max() >> 4;
+					++src;
+					while (src != src_end) {
+						byte_t c = *src;
+						if (hex > lim && isxdigit(c)) {
+							// overflow detected
+							if (on_bad_pos && !on_bad_pos(save - src_begin)) {
+								return dest - dest_begin;
+							}
+							unescaped = '?'; // invalid
+							++src;
+							break;
+						}
+						if (isdigit(c)) {
+							hex <<= 4;
+							hex |= c - '0';
+							++src;
+						}
+						else if (isxdigit(c)) {
+							hex <<= 4;
+							c = toupper(c);
+							hex |= c - 'A' + 0xA;
+							++src;
+						}
+						else {
+							break; // reached the end of the number
+						}
+					}
+					unescaped = hex;
+				}
+				break;
+			case '0': case '1': case '2': case '3':
+			case '4': case '5': case '6': case '7':
+				{
+					DestChar oct = 0;
+					DestChar const lim = std::numeric_limits<DestChar>::max() >> 3;
+					while (src != src_end) {
+						DestChar c = *src;
+						if (oct > lim && (c >= '0' && c <= '7')) {
+							// overflow detected
+							if (on_bad_pos && !on_bad_pos(save - src_begin)) {
+								return dest - dest_begin;
+							}
+							unescaped = '?'; // invalid
+							++src;
+							break;
+						}
+						if (c >= '0' && c <= '7') {
+							oct <<= 3;
+							oct |= c - '0';
+							++src;
+						} else {
+							break; // reached end of digits
+						}
+					}
+					unescaped = oct;
+				}
+				break;
+			default:
+				if (on_bad_pos && !on_bad_pos(save - src_begin)) {
+					return dest - dest_begin;
+				} else {
+					unescaped = *src;
+					++src;
+				}
+				break;
+			}
+		}
+		else {
+			unescaped = *src;
+			++src;
+		}
+		*dest++ = unescaped;
+	}
+	return dest - dest_begin;
+}
+
+TERARK_DLL_EXPORT
+size_t unescape_may_inplace(byte_t* dest, const byte_t* src, size_t len,
+							std::function<bool(size_t)> on_bad_pos) {
+	return unescape_may_inplace_tpl(dest, src, len, std::move(on_bad_pos));
+}
+TERARK_DLL_EXPORT
+size_t unescape(wchar_t* dest, const byte_t* src, size_t len,
+				std::function<bool(size_t)> on_bad_pos) {
+	return unescape_may_inplace_tpl(dest, src, len, std::move(on_bad_pos));
+}
+
+TERARK_DLL_EXPORT
+std::string unescape(fstring src, std::function<bool(size_t)> on_bad_pos) {
+	std::string dest;
+	string_resize_no_touch_memory(&dest, src.size());
+	byte_t* buf = (byte_t*)&dest[0];
+	size_t len = unescape_may_inplace
+		(buf, src.udata(), src.size(), std::move(on_bad_pos));
+	buf[len] = '\0';
+	string_resize_no_touch_memory(&dest, len);
+	return dest;
+}
+
+#if defined(__GLIBCXX__)
+void do_string_resize_no_touch_memory(std::string* bank, size_t sz);
+#if defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
+template<class RepT>
+void do_M_set_length_and_sharable(RepT* rep, size_t sz) {
+	// copy from bits/basic_string.h _M_set_length_and_sharable
+	// we removed check for rep != &_S_empty_rep() instead assert it
+	assert(rep != &RepT::_S_empty_rep()); // because bank->begin() was called
+	rep->_M_set_sharable();  // One reference.
+	rep->_M_length = sz;
+	// topling: comment out next line to reduce one memory write
+	// traits_type::assign(rep->_M_refdata()[sz], _S_terminal);
+}
+#endif
+template <typename Money_t, Money_t std::string::* p>
+struct string_thief {
+	friend
+	void do_string_resize_no_touch_memory(std::string* bank, size_t sz) {
+		// gcc bug: these lines of code can not be here:
+		//   ERROR: use of local variable with automatic storage from
+		//          containing function
+		// if (terark_unlikely(sz > bank->capacity())) {
+		// 	size_t old_size = bank->size();
+		// 	size_t cap = std::max(sz, old_size * 103/64); // 103/64 <~ 1.618
+		// 	bank->reserve(cap);
+		// }
+	#if defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
+		bank->begin(); // to copy on write
+		//(bank->*p)()->_M_set_length_and_sharable(sz);
+		do_M_set_length_and_sharable((bank->*p)(), sz);
+	#else
+		(bank->*p)(sz);
+	#endif
+	}
+};
+#if defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
+template struct string_thief<std::string::_Rep*() const noexcept,
+							&std::string::_M_rep>;
+#else
+template struct string_thief<void(std::string::size_type),
+							 &std::string::_M_length>;
+#endif
+
+void string_resize_no_touch_memory(std::string* bank, size_t sz) {
+	if (terark_unlikely(sz > bank->capacity())) {
+		size_t old_size = bank->size();
+		size_t cap = std::max(sz, old_size * 103/64); // 103/64 <~ 1.618
+		bank->reserve(cap);
+	}
+	do_string_resize_no_touch_memory(bank, sz);
+}
+void string_set_size_no_touch_memory(std::string* bank, size_t sz) {
+	do_string_resize_no_touch_memory(bank, sz);
+}
+#else
+void string_resize_no_touch_memory(std::string* bank, size_t sz) {
+  #if defined(_MSC_VER) && _MSC_VER >= 1938
+    #if !_HAS_CXX23
+	  #define resize_and_overwrite _Resize_and_overwrite
+    #endif
+	bank->resize_and_overwrite(sz, [](const char*, size_t n) { return n; });
+  #elif defined(__cpp_lib_string_resize_and_overwrite)
+	bank->resize_and_overwrite(sz, [](const char*, size_t n) { return n; });
+  #else
+	bank->resize(sz); // touch memory
+  #endif
+}
+void string_set_size_no_touch_memory(std::string* bank, size_t sz) {
+	string_resize_no_touch_memory(bank, sz);
+}
+#endif
+
+// 比较 a 和 b 的数值大小，如果 a > b，返回空接受状态
+// 简单的字符串比较逻辑需要考虑符号
+TERARK_DLL_EXPORT
+int decimal_strcmp(fstring a, bool a_neg, fstring b, bool b_neg) {
+	if (a_neg && !b_neg) return -1; // 负 < 正
+	if (!a_neg && b_neg) return +1; // 正 > 负
+	if (a.size() != b.size()) return a.size() < b.size() ? -1 : +1;
+	int cmp = a.compare(b);
+	if (cmp)
+		cmp = cmp < 0 ? -1 : +1;
+	if (!a_neg && !b_neg)
+		return +cmp;
+	else
+		return -cmp;
+}
+
+TERARK_DLL_EXPORT int decimal_strcmp(fstring a, fstring b) {
+	if (a.empty() || b.empty()) {
+		return -2;
+	}
+	bool a_neg = false, b_neg = false;
+	if (a[0] == '+')
+		a = a.substr(1);
+	else if (a[0] == '-')
+		a = a.substr(1), a_neg = true;
+
+	if (b[0] == '+')
+		b = b.substr(1);
+	else if (b[0] == '-')
+		b = b.substr(1), b_neg = true;
+
+	if (a.empty() || b.empty()) {
+		return -2;
+	}
+	for (byte_t c : a) {
+		if (c < '0' || c > '9')
+			return -2;
+	}
+	for (byte_t c : b) {
+		if (c < '0' || c > '9')
+			return -2;
+	}
+	return decimal_strcmp(a, a_neg, b, b_neg);
+}
+
+TERARK_DLL_EXPORT
+int realnum_strcmp(fstring a, bool a_neg, fstring b, bool b_neg) {
+	if (a_neg && !b_neg) return -1; // 负 < 正
+	if (!a_neg && b_neg) return 1;  // 正 > 负
+	TERARK_ASSERT_EQ(a_neg, b_neg);
+	size_t adot = a.find_i('.'); // 不存在则返回 a.size()
+	size_t bdot = b.find_i('.');
+	if (adot == bdot) { // 小数点位置相同，大小序就是字典序
+		int cmp = a.compare(b);
+		if (a_neg) {
+			cmp = -cmp;
+		}
+		if (cmp)
+			return cmp < 0 ? -1 : +1;
+		else
+			return 0;
+	}
+	// 小数点位置不同，小数点位置就是整数部分的位数
+	if (a_neg) { // 都是负数
+		return adot < bdot ? +1 : -1;
+	} else { // 都是正数，因为无前导0，所以整数部分更长的数字更大
+		return adot < bdot ? -1 : +1;
+	}
+}
+
+TERARK_DLL_EXPORT int realnum_strcmp(fstring a, fstring b) {
+	if (a.empty() || b.empty()) {
+		return -2;
+	}
+	bool a_neg = false, b_neg = false;
+	if (a[0] == '+')
+		a = a.substr(1);
+	else if (a[0] == '-')
+		a = a.substr(1), a_neg = true;
+
+	if (b[0] == '+')
+		b = b.substr(1);
+	else if (b[0] == '-')
+		b = b.substr(1), b_neg = true;
+
+	if (a.empty() || b.empty()) {
+		return -2;
+	}
+	int n_dot = 0;
+	for (byte_t c : a) {
+		if (c >= '0' && c <= '9') {}
+		else if ('.' == c) n_dot++;
+		else return -2;
+	}
+	if (n_dot > 1)
+		return -2;
+	n_dot = 0;
+	for (byte_t c : b) {
+		if (c >= '0' && c <= '9') {}
+		else if ('.' == c) n_dot++;
+		else return -2;
+	}
+	if (n_dot > 1)
+		return -2;
+
+	return realnum_strcmp(a, a_neg, b, b_neg);
+}
+
+} // namespace terark
+
+bool g_Terark_hasValgrind = terark::getEnvBool("Terark_hasValgrind", false);
+

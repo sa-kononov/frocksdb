@@ -52,6 +52,7 @@ class Allocator;
 class LookupKey;
 class SliceTransform;
 class Logger;
+class WriteBufferManager;
 struct DBOptions;
 
 using KeyHandle = void*;
@@ -417,5 +418,30 @@ extern MemTableRepFactory* NewHashLinkListRepFactory(
     int bucket_entries_logging_threshold = 4096,
     bool if_log_bucket_dist_when_flash = true,
     uint32_t threshold_use_skiplist = 256);
+
+// CSPP (Crash-Safe Persistent Patricia) memtable factory — a Patricia-trie
+// memtable ported from ToplingDB. Built only when WITH_CSPP_MEMTABLE=1 is
+// passed to make; the prototype is always declared so callers compile against
+// a single ABI regardless of whether the feature is linked in. When the
+// feature is not linked, references resolve to a stub that returns nullptr.
+//
+// @mem_cap: initial trie capacity in bytes. 0 selects an internal default.
+// @read_by_writer_token: if true, point lookups acquire a writer token
+//                        (cheaper on write-heavy workloads because the same
+//                        TLS token is reused). If false, lookups use a
+//                        separate reader token (cheaper on read-heavy
+//                        workloads).
+// @write_buffer_manager: when non-null, CSPP forwards its mempool byte
+//                        accounting to this WriteBufferManager via
+//                        ReserveMem/FreeMem. This is how the trie
+//                        participates in a slot-wide managed-memory budget
+//                        (e.g., Flink's RocksDBSharedResources). When the
+//                        WBM was constructed with a Cache, the same calls
+//                        also cause memtable bytes to be charged against
+//                        that cache via WBM's internal
+//                        CacheReservationManager (cost-to-cache).
+extern MemTableRepFactory* NewCSPPMemTableRepFactory(
+    size_t mem_cap = 0, bool read_by_writer_token = true,
+    WriteBufferManager* write_buffer_manager = nullptr);
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -212,6 +212,40 @@ endif
 #-----------------------------------------------
 include src.mk
 
+# CSPP memtable port (optional). Default off so vanilla builds are unchanged.
+# Enable with: make WITH_CSPP_MEMTABLE=1
+#
+# Build prerequisites for WITH_CSPP_MEMTABLE=1:
+#   Debian/Ubuntu:  apt-get install libboost-dev
+#   RHEL/Fedora:    dnf install boost-devel
+#   macOS:          brew install boost
+# Only header-only parts of boost are used (predef, mpl, type_traits,
+# multi_index, smart_ptr, etc.); the resulting librocksdbjni.so has no
+# libboost*.so runtime dependency.
+#
+# Phase 1 ships only the scaffolding (stub factory + Makefile gate). Phase 2
+# vendors the terark sources into third-party/terark/; phase 3 lands the real
+# ported memtable implementation; phase 4 wires up ObjectRegistry.
+ifeq ($(WITH_CSPP_MEMTABLE),1)
+  CXXFLAGS    += -DHAS_CSPP_MEMTABLE -DTOPLING_USE_DYNAMIC_TLS
+  # terark headers are #included as <terark/...>; vendored under third-party/
+  CXXFLAGS    += -Ithird-party
+  LIB_SOURCES += memtable/cspp.cc
+  # Java/JNI bridge for CSPPMemTableConfig. Picked up by the rocksdbjava*
+  # targets via $(ALL_JNI_NATIVE_SOURCES).
+  JNI_NATIVE_SOURCES += java/rocksjni/cspp_jni.cc
+  # Vendored terark .cpp set (all *.cpp under third-party/terark/). The
+  # objects are appended to LIB_OBJECTS below, after LIB_OBJECTS is defined.
+  CSPP_TERARK_SOURCES := $(shell find third-party/terark -name '*.cpp')
+  # Vendored third-party code is not audited under rocksdb's strict warning
+  # set; suppress warnings on the terark tree only. Also force -frtti: terark
+  # uses typeid() for runtime DFA type strings, which conflicts with
+  # rocksdb's release-mode -fno-rtti. Append -frtti so it overrides any
+  # earlier -fno-rtti in CXXFLAGS (gcc takes the last conflicting flag).
+  $(OBJ_DIR)/third-party/terark/%.o: CXXFLAGS += -w -Wno-error -frtti
+  third-party/terark/%.o: CXXFLAGS += -w -Wno-error -frtti
+endif
+
 AM_DEFAULT_VERBOSITY ?= 0
 
 AM_V_GEN = $(am__v_GEN_$(V))
@@ -620,6 +654,10 @@ endif
 
 ifeq ($(USE_FOLLY_LITE),1)
   LIB_OBJECTS += $(patsubst %.cpp, $(OBJ_DIR)/%.o, $(FOLLY_SOURCES))
+endif
+
+ifeq ($(WITH_CSPP_MEMTABLE),1)
+  LIB_OBJECTS += $(patsubst %.cpp, $(OBJ_DIR)/%.o, $(CSPP_TERARK_SOURCES))
 endif
 
 # range_tree is not compatible with non GNU libc on ppc64
@@ -1340,6 +1378,12 @@ persistent_cache_bench: $(OBJ_DIR)/utilities/persistent_cache/persistent_cache_b
 	$(AM_LINK)
 
 memtablerep_bench: $(OBJ_DIR)/memtable/memtablerep_bench.o $(LIBRARY)
+	$(AM_LINK)
+
+cspp_test: $(OBJ_DIR)/memtable/cspp_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+cspp_wbm_test: $(OBJ_DIR)/memtable/cspp_wbm_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 filter_bench: $(OBJ_DIR)/util/filter_bench.o $(LIBRARY)
@@ -2595,6 +2639,9 @@ DEPFILES = $(patsubst %.cc, $(OBJ_DIR)/%.cc.d, $(ALL_SOURCES))
 DEPFILES+ = $(patsubst %.c, $(OBJ_DIR)/%.c.d, $(LIB_SOURCES_C) $(TEST_MAIN_SOURCES_C))
 ifeq ($(USE_FOLLY_LITE),1)
   DEPFILES +=$(patsubst %.cpp, $(OBJ_DIR)/%.cpp.d, $(FOLLY_SOURCES))
+endif
+ifeq ($(WITH_CSPP_MEMTABLE),1)
+  DEPFILES += $(patsubst %.cpp, $(OBJ_DIR)/%.cpp.d, $(CSPP_TERARK_SOURCES))
 endif
 endif
 
