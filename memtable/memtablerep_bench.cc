@@ -202,9 +202,9 @@ class KeyGenerator {
 class BenchmarkThread {
  public:
   explicit BenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                           uint64_t* bytes_written, uint64_t* bytes_read,
-                           uint64_t* sequence, uint64_t num_ops,
-                           uint64_t* read_hits)
+                           std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                           std::atomic<uint64_t>* sequence, uint64_t num_ops,
+                           std::atomic<uint64_t>* read_hits)
       : table_(table),
         key_gen_(key_gen),
         bytes_written_(bytes_written),
@@ -219,19 +219,19 @@ class BenchmarkThread {
  protected:
   MemTableRep* table_;
   KeyGenerator* key_gen_;
-  uint64_t* bytes_written_;
-  uint64_t* bytes_read_;
-  uint64_t* sequence_;
+  std::atomic<uint64_t>* bytes_written_;
+  std::atomic<uint64_t>* bytes_read_;
+  std::atomic<uint64_t>* sequence_;
   uint64_t num_ops_;
-  uint64_t* read_hits_;
+  std::atomic<uint64_t>* read_hits_;
   RandomGenerator generator_;
 };
 
 class FillBenchmarkThread : public BenchmarkThread {
  public:
   FillBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                      uint64_t* bytes_written, uint64_t* bytes_read,
-                      uint64_t* sequence, uint64_t num_ops, uint64_t* read_hits)
+                      std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                      std::atomic<uint64_t>* sequence, uint64_t num_ops, std::atomic<uint64_t>* read_hits)
       : BenchmarkThread(table, key_gen, bytes_written, bytes_read, sequence,
                         num_ops, read_hits) {}
 
@@ -246,14 +246,14 @@ class FillBenchmarkThread : public BenchmarkThread {
     auto key = key_gen_->Next();
     EncodeFixed64(p, key);
     p += 8;
-    EncodeFixed64(p, ++(*sequence_));
+    EncodeFixed64(p, sequence_->fetch_add(1, std::memory_order_relaxed) + 1);
     p += 8;
     Slice bytes = generator_.Generate(FLAGS_item_size);
     memcpy(p, bytes.data(), FLAGS_item_size);
     p += FLAGS_item_size;
     assert(p == buf + encoded_len);
     table_->Insert(handle);
-    *bytes_written_ += encoded_len;
+    bytes_written_->fetch_add(encoded_len, std::memory_order_relaxed);
   }
 
   void operator()() override {
@@ -266,9 +266,9 @@ class FillBenchmarkThread : public BenchmarkThread {
 class ConcurrentFillBenchmarkThread : public FillBenchmarkThread {
  public:
   ConcurrentFillBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                                uint64_t* bytes_written, uint64_t* bytes_read,
-                                uint64_t* sequence, uint64_t num_ops,
-                                uint64_t* read_hits,
+                                std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                                std::atomic<uint64_t>* sequence, uint64_t num_ops,
+                                std::atomic<uint64_t>* read_hits,
                                 std::atomic_int* threads_done)
       : FillBenchmarkThread(table, key_gen, bytes_written, bytes_read, sequence,
                             num_ops, read_hits) {
@@ -290,8 +290,8 @@ class ConcurrentFillBenchmarkThread : public FillBenchmarkThread {
 class ReadBenchmarkThread : public BenchmarkThread {
  public:
   ReadBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                      uint64_t* bytes_written, uint64_t* bytes_read,
-                      uint64_t* sequence, uint64_t num_ops, uint64_t* read_hits)
+                      std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                      std::atomic<uint64_t>* sequence, uint64_t num_ops, std::atomic<uint64_t>* read_hits)
       : BenchmarkThread(table, key_gen, bytes_written, bytes_read, sequence,
                         num_ops, read_hits) {}
 
@@ -313,7 +313,8 @@ class ReadBenchmarkThread : public BenchmarkThread {
     std::string user_key;
     auto key = key_gen_->Next();
     PutFixed64(&user_key, key);
-    LookupKey lookup_key(user_key, *sequence_);
+    LookupKey lookup_key(user_key,
+                         sequence_->load(std::memory_order_relaxed));
     InternalKeyComparator internal_key_comp(BytewiseComparator());
     CallbackVerifyArgs verify_args;
     verify_args.found = false;
@@ -322,8 +323,9 @@ class ReadBenchmarkThread : public BenchmarkThread {
     verify_args.comparator = &internal_key_comp;
     table_->Get(lookup_key, &verify_args, callback);
     if (verify_args.found) {
-      *bytes_read_ += VarintLength(16) + 16 + FLAGS_item_size;
-      ++*read_hits_;
+      bytes_read_->fetch_add(VarintLength(16) + 16 + FLAGS_item_size,
+                             std::memory_order_relaxed);
+      read_hits_->fetch_add(1, std::memory_order_relaxed);
     }
   }
   void operator()() override {
@@ -336,9 +338,9 @@ class ReadBenchmarkThread : public BenchmarkThread {
 class SeqReadBenchmarkThread : public BenchmarkThread {
  public:
   SeqReadBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                         uint64_t* bytes_written, uint64_t* bytes_read,
-                         uint64_t* sequence, uint64_t num_ops,
-                         uint64_t* read_hits)
+                         std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                         std::atomic<uint64_t>* sequence, uint64_t num_ops,
+                         std::atomic<uint64_t>* read_hits)
       : BenchmarkThread(table, key_gen, bytes_written, bytes_read, sequence,
                         num_ops, read_hits) {}
 
@@ -346,9 +348,10 @@ class SeqReadBenchmarkThread : public BenchmarkThread {
     std::unique_ptr<MemTableRep::Iterator> iter(table_->GetIterator());
     for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
       // pretend to read the value
-      *bytes_read_ += VarintLength(16) + 16 + FLAGS_item_size;
+      bytes_read_->fetch_add(VarintLength(16) + 16 + FLAGS_item_size,
+                             std::memory_order_relaxed);
     }
-    ++*read_hits_;
+    read_hits_->fetch_add(1, std::memory_order_relaxed);
   }
 
   void operator()() override {
@@ -361,9 +364,9 @@ class SeqReadBenchmarkThread : public BenchmarkThread {
 class ConcurrentReadBenchmarkThread : public ReadBenchmarkThread {
  public:
   ConcurrentReadBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                                uint64_t* bytes_written, uint64_t* bytes_read,
-                                uint64_t* sequence, uint64_t num_ops,
-                                uint64_t* read_hits,
+                                std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                                std::atomic<uint64_t>* sequence, uint64_t num_ops,
+                                std::atomic<uint64_t>* read_hits,
                                 std::atomic_int* threads_done)
       : ReadBenchmarkThread(table, key_gen, bytes_written, bytes_read, sequence,
                             num_ops, read_hits) {
@@ -384,9 +387,9 @@ class ConcurrentReadBenchmarkThread : public ReadBenchmarkThread {
 class SeqConcurrentReadBenchmarkThread : public SeqReadBenchmarkThread {
  public:
   SeqConcurrentReadBenchmarkThread(MemTableRep* table, KeyGenerator* key_gen,
-                                   uint64_t* bytes_written,
-                                   uint64_t* bytes_read, uint64_t* sequence,
-                                   uint64_t num_ops, uint64_t* read_hits,
+                                   std::atomic<uint64_t>* bytes_written,
+                                   std::atomic<uint64_t>* bytes_read, std::atomic<uint64_t>* sequence,
+                                   uint64_t num_ops, std::atomic<uint64_t>* read_hits,
                                    std::atomic_int* threads_done)
       : SeqReadBenchmarkThread(table, key_gen, bytes_written, bytes_read,
                                sequence, num_ops, read_hits) {
@@ -407,7 +410,7 @@ class SeqConcurrentReadBenchmarkThread : public SeqReadBenchmarkThread {
 class Benchmark {
  public:
   explicit Benchmark(MemTableRep* table, KeyGenerator* key_gen,
-                     uint64_t* sequence, uint32_t num_threads)
+                     std::atomic<uint64_t>* sequence, uint32_t num_threads)
       : table_(table),
         key_gen_(key_gen),
         sequence_(sequence),
@@ -417,17 +420,19 @@ class Benchmark {
   virtual void Run() {
     std::cout << "Number of threads: " << num_threads_ << std::endl;
     std::vector<port::Thread> threads;
-    uint64_t bytes_written = 0;
-    uint64_t bytes_read = 0;
-    uint64_t read_hits = 0;
+    std::atomic<uint64_t> bytes_written{0};
+    std::atomic<uint64_t> bytes_read{0};
+    std::atomic<uint64_t> read_hits{0};
     StopWatchNano timer(SystemClock::Default().get(), true);
     RunThreads(&threads, &bytes_written, &bytes_read, true, &read_hits);
     auto elapsed_time = static_cast<double>(timer.ElapsedNanos() / 1000);
     std::cout << "Elapsed time: " << static_cast<int>(elapsed_time) << " us"
               << std::endl;
 
-    if (bytes_written > 0) {
-      auto MiB_written = static_cast<double>(bytes_written) / (1 << 20);
+    const uint64_t total_bw = bytes_written.load(std::memory_order_relaxed);
+    const uint64_t total_br = bytes_read.load(std::memory_order_relaxed);
+    if (total_bw > 0) {
+      auto MiB_written = static_cast<double>(total_bw) / (1 << 20);
       auto write_throughput = MiB_written / (elapsed_time / 1000000);
       std::cout << "Total bytes written: " << MiB_written << " MiB"
                 << std::endl;
@@ -436,8 +441,8 @@ class Benchmark {
       auto us_per_op = elapsed_time / num_write_ops_per_thread_;
       std::cout << "write us/op: " << us_per_op << std::endl;
     }
-    if (bytes_read > 0) {
-      auto MiB_read = static_cast<double>(bytes_read) / (1 << 20);
+    if (total_br > 0) {
+      auto MiB_read = static_cast<double>(total_br) / (1 << 20);
       auto read_throughput = MiB_read / (elapsed_time / 1000000);
       std::cout << "Total bytes read: " << MiB_read << " MiB" << std::endl;
       std::cout << "Read throughput: " << read_throughput << " MiB/s"
@@ -448,13 +453,13 @@ class Benchmark {
   }
 
   virtual void RunThreads(std::vector<port::Thread>* threads,
-                          uint64_t* bytes_written, uint64_t* bytes_read,
-                          bool write, uint64_t* read_hits) = 0;
+                          std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read,
+                          bool write, std::atomic<uint64_t>* read_hits) = 0;
 
  protected:
   MemTableRep* table_;
   KeyGenerator* key_gen_;
-  uint64_t* sequence_;
+  std::atomic<uint64_t>* sequence_;
   uint64_t num_write_ops_per_thread_ = 0;
   uint64_t num_read_ops_per_thread_ = 0;
   const uint32_t num_threads_;
@@ -463,14 +468,14 @@ class Benchmark {
 class FillBenchmark : public Benchmark {
  public:
   explicit FillBenchmark(MemTableRep* table, KeyGenerator* key_gen,
-                         uint64_t* sequence)
+                         std::atomic<uint64_t>* sequence)
       : Benchmark(table, key_gen, sequence, 1) {
     num_write_ops_per_thread_ = FLAGS_num_operations;
   }
 
-  void RunThreads(std::vector<port::Thread>* /*threads*/, uint64_t* bytes_written,
-                  uint64_t* bytes_read, bool /*write*/,
-                  uint64_t* read_hits) override {
+  void RunThreads(std::vector<port::Thread>* /*threads*/,
+                  std::atomic<uint64_t>* bytes_written, std::atomic<uint64_t>* bytes_read, bool /*write*/,
+                  std::atomic<uint64_t>* read_hits) override {
     FillBenchmarkThread(table_, key_gen_, bytes_written, bytes_read, sequence_,
                         num_write_ops_per_thread_, read_hits)();
   }
@@ -479,14 +484,14 @@ class FillBenchmark : public Benchmark {
 class ReadBenchmark : public Benchmark {
  public:
   explicit ReadBenchmark(MemTableRep* table, KeyGenerator* key_gen,
-                         uint64_t* sequence)
+                         std::atomic<uint64_t>* sequence)
       : Benchmark(table, key_gen, sequence, FLAGS_num_threads) {
     num_read_ops_per_thread_ = FLAGS_num_operations / FLAGS_num_threads;
   }
 
-  void RunThreads(std::vector<port::Thread>* threads, uint64_t* bytes_written,
-                  uint64_t* bytes_read, bool /*write*/,
-                  uint64_t* read_hits) override {
+  void RunThreads(std::vector<port::Thread>* threads, std::atomic<uint64_t>* bytes_written,
+                  std::atomic<uint64_t>* bytes_read, bool /*write*/,
+                  std::atomic<uint64_t>* read_hits) override {
     for (int i = 0; i < FLAGS_num_threads; ++i) {
       threads->emplace_back(
           ReadBenchmarkThread(table_, key_gen_, bytes_written, bytes_read,
@@ -495,22 +500,25 @@ class ReadBenchmark : public Benchmark {
     for (auto& thread : *threads) {
       thread.join();
     }
-    std::cout << "read hit%: "
-              << (static_cast<double>(*read_hits) / FLAGS_num_operations) * 100
-              << std::endl;
+    std::cout
+        << "read hit%: "
+        << (static_cast<double>(read_hits->load(std::memory_order_relaxed)) /
+            FLAGS_num_operations) *
+               100
+        << std::endl;
   }
 };
 
 class SeqReadBenchmark : public Benchmark {
  public:
-  explicit SeqReadBenchmark(MemTableRep* table, uint64_t* sequence)
+  explicit SeqReadBenchmark(MemTableRep* table, std::atomic<uint64_t>* sequence)
       : Benchmark(table, nullptr, sequence, FLAGS_num_threads) {
     num_read_ops_per_thread_ = FLAGS_num_scans;
   }
 
-  void RunThreads(std::vector<port::Thread>* threads, uint64_t* bytes_written,
-                  uint64_t* bytes_read, bool /*write*/,
-                  uint64_t* read_hits) override {
+  void RunThreads(std::vector<port::Thread>* threads, std::atomic<uint64_t>* bytes_written,
+                  std::atomic<uint64_t>* bytes_read, bool /*write*/,
+                  std::atomic<uint64_t>* read_hits) override {
     for (int i = 0; i < FLAGS_num_threads; ++i) {
       threads->emplace_back(SeqReadBenchmarkThread(
           table_, key_gen_, bytes_written, bytes_read, sequence_,
@@ -526,7 +534,7 @@ template <class ReadThreadType>
 class ReadWriteBenchmark : public Benchmark {
  public:
   explicit ReadWriteBenchmark(MemTableRep* table, KeyGenerator* key_gen,
-                              uint64_t* sequence)
+                              std::atomic<uint64_t>* sequence)
       : Benchmark(table, key_gen, sequence, FLAGS_num_threads) {
     num_read_ops_per_thread_ =
         FLAGS_num_threads <= 1
@@ -535,9 +543,9 @@ class ReadWriteBenchmark : public Benchmark {
     num_write_ops_per_thread_ = FLAGS_num_operations;
   }
 
-  void RunThreads(std::vector<port::Thread>* threads, uint64_t* bytes_written,
-                  uint64_t* bytes_read, bool /*write*/,
-                  uint64_t* read_hits) override {
+  void RunThreads(std::vector<port::Thread>* threads, std::atomic<uint64_t>* bytes_written,
+                  std::atomic<uint64_t>* bytes_read, bool /*write*/,
+                  std::atomic<uint64_t>* read_hits) override {
     std::atomic_int threads_done;
     threads_done.store(0);
     threads->emplace_back(ConcurrentFillBenchmarkThread(
@@ -620,9 +628,9 @@ int main(int argc, char** argv) {
   ROCKSDB_NAMESPACE::MemTable::KeyComparator key_comp(internal_key_comp);
   ROCKSDB_NAMESPACE::Arena arena;
   ROCKSDB_NAMESPACE::WriteBufferManager wb(FLAGS_write_buffer_size);
-  uint64_t sequence;
+  std::atomic<uint64_t> sequence{0};
   auto createMemtableRep = [&] {
-    sequence = 0;
+    sequence.store(0, std::memory_order_relaxed);
     return factory->CreateMemTableRep(key_comp, &arena,
                                       options.prefix_extractor.get(),
                                       options.info_log.get());
