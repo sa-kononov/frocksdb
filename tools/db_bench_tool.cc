@@ -1366,6 +1366,9 @@ enum RepFactory {
   kPrefixHash,
   kVectorRep,
   kHashLinkedList,
+#ifdef HAS_CSPP_MEMTABLE
+  kCSPP,
+#endif
 };
 
 static enum RepFactory StringToRepFactory(const char* ctype) {
@@ -1379,6 +1382,10 @@ static enum RepFactory StringToRepFactory(const char* ctype) {
     return kVectorRep;
   else if (!strcasecmp(ctype, "hash_linkedlist"))
     return kHashLinkedList;
+#ifdef HAS_CSPP_MEMTABLE
+  else if (!strcasecmp(ctype, "cspp"))
+    return kCSPP;
+#endif
 
   fprintf(stdout, "Cannot parse memreptable %s\n", ctype);
   return kSkipList;
@@ -2583,6 +2590,11 @@ class Benchmark {
       case kHashLinkedList:
         fprintf(stdout, "Memtablerep: hash_linkedlist\n");
         break;
+#ifdef HAS_CSPP_MEMTABLE
+      case kCSPP:
+        fprintf(stdout, "Memtablerep: cspp\n");
+        break;
+#endif
     }
     fprintf(stdout, "Perf Level: %d\n", FLAGS_perf_level);
 
@@ -3853,6 +3865,13 @@ class Benchmark {
           new VectorRepFactory
         );
         break;
+#ifdef HAS_CSPP_MEMTABLE
+      case kCSPP:
+        options.memtable_factory.reset(
+          NewCSPPMemTableRepFactory(4 * FLAGS_write_buffer_size)
+        );
+        break;
+#endif
 #else
       default:
         fprintf(stderr, "Only skip list is supported in lite mode\n");
