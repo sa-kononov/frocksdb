@@ -469,6 +469,12 @@ default: all
 WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
   -Wunused-parameter
 
+# gcc 13 added -Wredundant-move (warns when std::move is unnecessary in a
+# return statement because the implicit move already applies). The 6.20.3
+# tree has several such sites; silence to keep -Werror builds working on
+# both gcc 11 (no such warning) and gcc 13.
+WARNING_FLAGS += -Wno-redundant-move
+
 ifeq (,$(filter amd64, $(MACHINE)))
 	C_WARNING_FLAGS = -Wstrict-prototypes
 endif
