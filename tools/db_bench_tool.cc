@@ -1787,6 +1787,10 @@ static Status CreateMemTableRepFactory(
     factory->reset(new VectorRepFactory());
   } else if (!strcasecmp(FLAGS_memtablerep.c_str(), "hash_linkedlist")) {
     factory->reset(NewHashLinkListRepFactory(FLAGS_hash_bucket_count));
+#ifdef HAS_CSPP_MEMTABLE
+  } else if (!strcasecmp(FLAGS_memtablerep.c_str(), "cspp")) {
+    factory->reset(NewCSPPMemTableRepFactory(4 * FLAGS_write_buffer_size));
+#endif
   } else {
     std::unique_ptr<MemTableRepFactory> unique;
     s = MemTableRepFactory::CreateFromString(config_options, FLAGS_memtablerep,
