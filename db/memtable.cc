@@ -287,8 +287,12 @@ class MemTableIterator : public InternalIterator {
         comparator_(mem.comparator_),
         valid_(false),
         arena_mode_(arena != nullptr),
+        entries_pinned_((use_range_del_table ? mem.range_del_table_
+                                             : mem.table_)
+                            ->IsIteratorPinned()),
         value_pinned_(
-            !mem.GetImmutableMemTableOptions()->inplace_update_support) {
+            !mem.GetImmutableMemTableOptions()->inplace_update_support &&
+            entries_pinned_) {
     if (use_range_del_table) {
       iter_ = mem.range_del_table_->GetIterator(arena);
     } else if (prefix_extractor_ != nullptr && !read_options.total_order_seek &&
@@ -414,12 +418,14 @@ class MemTableIterator : public InternalIterator {
   Status status() const override { return Status::OK(); }
 
   bool IsKeyPinned() const override {
-    // memtable data is always pinned
-    return true;
+    // Pinned for arena-backed reps; false for reps whose iterator reconstructs
+    // each entry into a buffer reused across positions (e.g. CSPP).
+    return entries_pinned_;
   }
 
   bool IsValuePinned() const override {
-    // memtable value is always pinned, except if we allow inplace update.
+    // memtable value is always pinned, except if we allow inplace update or the
+    // rep's iterator entries are not pinned (see entries_pinned_).
     return value_pinned_;
   }
 
@@ -430,6 +436,7 @@ class MemTableIterator : public InternalIterator {
   MemTableRep::Iterator* iter_;
   bool valid_;
   bool arena_mode_;
+  bool entries_pinned_;
   bool value_pinned_;
 };
 
@@ -698,8 +705,14 @@ struct Saver {
 };
 }  // namespace
 
-static bool SaveValue(void* arg, const char* entry) {
-  Saver* s = reinterpret_cast<Saver*>(arg);
+// Core of the memtable point-lookup callback, operating on an already-decoded
+// entry: `user_key_slice` (user key incl. timestamp), `tag` (seqno<<8 | type),
+// and `value` (value bytes, length-prefix already stripped). Callers must keep
+// `value` valid for as long as a pinned merge operand may be read — that is,
+// the memtable lifetime for arena-backed reps (via SaveValue) and for reps
+// exposing stable values via MemTableRep::GetStableValue (via SaveValueStable).
+static bool SaveValueImpl(Saver* s, const Slice& user_key_slice, uint64_t tag,
+                          const Slice& value) {
   assert(s != nullptr);
   MergeContext* merge_context = s->merge_context;
   SequenceNumber max_covering_tombstone_seq = s->max_covering_tombstone_seq;
@@ -707,26 +720,12 @@ static bool SaveValue(void* arg, const char* entry) {
 
   assert(merge_context != nullptr);
 
-  // entry format is:
-  //    klength  varint32
-  //    userkey  char[klength-8]
-  //    tag      uint64
-  //    vlength  varint32f
-  //    value    char[vlength]
-  // Check that it belongs to same user key.  We do not check the
-  // sequence number since the Seek() call above should have skipped
-  // all entries with overly large sequence numbers.
-  uint32_t key_length = 0;
-  const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
-  assert(key_length >= 8);
-  Slice user_key_slice = Slice(key_ptr, key_length - 8);
   const Comparator* user_comparator =
       s->mem->GetInternalKeyComparator().user_comparator();
   size_t ts_sz = user_comparator->timestamp_size();
   if (user_comparator->EqualWithoutTimestamp(user_key_slice,
                                              s->key->user_key())) {
     // Correct user key
-    const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
     ValueType type;
     SequenceNumber seq;
     UnPackSequenceAndType(tag, &seq, &type);
@@ -761,7 +760,7 @@ static bool SaveValue(void* arg, const char* entry) {
         if (s->inplace_update_support) {
           s->mem->GetLock(s->key->user_key())->ReadLock();
         }
-        Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
+        Slice v = value;
         *(s->status) = Status::OK();
         if (*(s->merge_in_progress)) {
           if (s->do_merge) {
@@ -827,7 +826,7 @@ static bool SaveValue(void* arg, const char* entry) {
           *(s->found_final_value) = true;
           return false;
         }
-        Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
+        Slice v = value;
         *(s->merge_in_progress) = true;
         merge_context->PushOperand(
             v, s->inplace_update_support == false /* operand_pinned */);
@@ -859,6 +858,37 @@ static bool SaveValue(void* arg, const char* entry) {
 
   // s->state could be Corrupt, merge or notfound
   return false;
+}
+
+// Contiguous-entry callback (the MemTableRep::Get ABI). Decodes the entry and
+// delegates to SaveValueImpl. `value` points into the entry, which arena-backed
+// reps keep valid for the memtable lifetime, so pinned merge operands stay
+// valid past this callback.
+static bool SaveValue(void* arg, const char* entry) {
+  Saver* s = reinterpret_cast<Saver*>(arg);
+  assert(s != nullptr);
+  // entry format is:
+  //    klength  varint32
+  //    userkey  char[klength-8]
+  //    tag      uint64
+  //    vlength  varint32f
+  //    value    char[vlength]
+  uint32_t key_length = 0;
+  const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
+  assert(key_length >= 8);
+  Slice user_key_slice = Slice(key_ptr, key_length - 8);
+  const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
+  Slice value = GetLengthPrefixedSlice(key_ptr + key_length);
+  return SaveValueImpl(s, user_key_slice, tag, value);
+}
+
+// Stable-value callback (the MemTableRep::GetStableValue ABI). The rep passes
+// the already-decoded user key, tag, and a value Slice backed by memtable-
+// lifetime storage, so no entry reconstruction is needed and pinned merge
+// operands remain valid.
+static bool SaveValueStable(void* arg, const Slice& user_key, uint64_t tag,
+                            const Slice& value) {
+  return SaveValueImpl(reinterpret_cast<Saver*>(arg), user_key, tag, value);
 }
 
 bool MemTable::Get(const LookupKey& key, std::string* value,
@@ -949,7 +979,14 @@ void MemTable::GetFromTable(const LookupKey& key,
   saver.is_blob_index = is_blob_index;
   saver.do_merge = do_merge;
   saver.allow_data_in_errors = moptions_.allow_data_in_errors;
-  table_->Get(key, &saver, SaveValue);
+  // Reps that expose values backed by memtable-lifetime-stable memory use the
+  // zero-copy stable-value path (no contiguous-entry reconstruction); others
+  // use the classic contiguous-entry callback.
+  if (table_->SupportsStableValueGet()) {
+    table_->GetStableValue(key, &saver, SaveValueStable);
+  } else {
+    table_->Get(key, &saver, SaveValue);
+  }
   *seq = saver.seq;
 }
 

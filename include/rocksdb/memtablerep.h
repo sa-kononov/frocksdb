@@ -191,6 +191,32 @@ class MemTableRep {
   virtual void Get(const LookupKey& k, void* callback_args,
                    bool (*callback_func)(void* arg, const char* entry));
 
+  // Optional zero-copy point-lookup path. A rep returning true from
+  // SupportsStableValueGet() must implement GetStableValue(): it invokes
+  // `callback` once per entry matching k.user_key(), in DESCENDING tag order
+  // (newest first), passing the entry's user key, full tag (seqno << 8 | type),
+  // and value. Unlike Get()'s reconstructed `const char*` entry (valid only for
+  // the duration of the callback), the `value` Slice MUST remain valid for the
+  // memtable's lifetime, which lets callers pin merge operands without copying.
+  // Callers fall back to Get() when SupportsStableValueGet() returns false (the
+  // default).
+  using StableValueCallback = bool (*)(void* arg, const Slice& user_key,
+                                       uint64_t tag, const Slice& value);
+  virtual bool SupportsStableValueGet() const { return false; }
+  virtual void GetStableValue(const LookupKey& /*k*/, void* /*callback_args*/,
+                              StableValueCallback /*callback*/) {
+    // Only invoked when SupportsStableValueGet() returns true.
+  }
+
+  // Whether the key() and value() returned by this rep's Iterator stay valid
+  // past a subsequent Next()/Prev()/Seek() (until the iterator is destroyed) —
+  // i.e. whether the iterator's entries are "pinned". Arena-backed reps that
+  // expose entries by direct pointer return true (the default). Reps that
+  // reconstruct each entry into a buffer reused across positions must return
+  // false, so callers (e.g. the merge path in DBIter) copy out retained
+  // key/value bytes instead of holding dangling/aliasing pointers.
+  virtual bool IsIteratorPinned() const { return true; }
+
   virtual uint64_t ApproximateNumEntries(const Slice& /*start_ikey*/,
                                          const Slice& /*end_key*/) {
     return 0;

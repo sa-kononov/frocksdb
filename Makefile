@@ -218,11 +218,14 @@ ifeq ($(WITH_CSPP_MEMTABLE),1)
   # earlier -fno-rtti in CXXFLAGS (gcc takes the last conflicting flag).
   # terark requires C++17 (uses std::decay_t, structured bindings, etc.); the
   # 6.20.3 base build defaults to -std=c++11, so append -std=c++17 here so the
-  # last -std= flag wins for terark sources and memtable/cspp.cc only.
+  # last -std= flag wins for terark sources and the CSPP memtable + its test
+  # (cspp_test.cc uses std::make_unique and structured bindings).
   $(OBJ_DIR)/third-party/terark/%.o: CXXFLAGS += -w -Wno-error -frtti -std=c++17
   third-party/terark/%.o: CXXFLAGS += -w -Wno-error -frtti -std=c++17
   $(OBJ_DIR)/memtable/cspp.o: CXXFLAGS += -std=c++17
   memtable/cspp.o: CXXFLAGS += -std=c++17
+  $(OBJ_DIR)/memtable/cspp_test.o: CXXFLAGS += -std=c++17
+  memtable/cspp_test.o: CXXFLAGS += -std=c++17
 endif
 
 AM_DEFAULT_VERBOSITY ?= 0

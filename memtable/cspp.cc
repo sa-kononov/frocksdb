@@ -191,8 +191,22 @@ struct CSPPMemTab : public MemTableRep {
   void InsertConcurrently(KeyHandle handle) override;
   bool InsertKeyConcurrently(KeyHandle handle) override;
   bool Contains(const char* key) const override;
+  // Contiguous-entry Get: the reconstructed entry is valid only for the
+  // duration of each callback invocation. Point lookups (and the merge path,
+  // which pins operands past the callback) go through GetStableValue instead;
+  // see SupportsStableValueGet below.
   void Get(const LookupKey& k, void* callback_args,
            bool (*callback_func)(void*, const char*)) override;
+  // CSPP stores values in the trie mempool, stable for the memtable's lifetime,
+  // so it serves the zero-copy stable-value path: no entry reconstruction and
+  // merge operands can be pinned without copying.
+  bool SupportsStableValueGet() const override { return true; }
+  void GetStableValue(const LookupKey& k, void* callback_args,
+                      StableValueCallback callback) override;
+  // The iterator reconstructs each entry into a per-iterator buffer reused
+  // across positions, so its key()/value() are not stable past Next(); callers
+  // must copy out retained bytes (e.g. merge operands) rather than pin them.
+  bool IsIteratorPinned() const override { return false; }
   void MarkReadOnly() override;
   void MarkFlushed() override;
   size_t ApproximateMemoryUsage() override;
@@ -446,6 +460,39 @@ void CSPPMemTab::Get(const LookupKey& k, void* callback_args,
                       Slice(user_key.data(), user_key.size()),
                       entry[idx].tag, val);
     if (!callback_func(callback_args, scratch.data())) break;
+  }
+  m_token_use_idle ? token->idle() : token->release();
+}
+
+void CSPPMemTab::GetStableValue(const LookupKey& k, void* callback_args,
+                                StableValueCallback callback) {
+  if (UNLIKELY(m_is_empty.load(std::memory_order_relaxed))) return;
+  Slice ikey = k.internal_key();
+  if (ikey.size() < 8) return;
+  fstring user_key(ikey.data(), ikey.size() - 8);
+  const uint64_t find_tag = DecodeFixed64(ikey.data() + ikey.size() - 8);
+
+  auto token = reader_token();
+  token->acquire(&m_trie);
+  if (!m_trie.lookup(user_key, token)) {
+    m_token_use_idle ? token->idle() : token->release();
+    return;
+  }
+  auto vec_pin = reinterpret_cast<VecPin*>(
+      m_trie.mem_get(m_trie.value_of<uint32_t>(*token)));
+  const uint32_t num = vec_pin->num & ~LOCK_FLAG;
+  auto entry = reinterpret_cast<Entry*>(m_trie.mem_get(vec_pin->pos));
+  const auto* mempool = static_cast<const char*>(m_trie.mem_get(0));
+  intptr_t idx = upper_bound_0(entry, num, find_tag);
+
+  // The user_key Slice points into the caller's LookupKey (valid for this call,
+  // which is all SaveValueImpl needs); each value Slice points into the trie
+  // mempool, stable for the memtable's lifetime, so the caller may pin merge
+  // operands without copying. No entry reconstruction, no scratch buffer.
+  const Slice user_key_slice(user_key.data(), user_key.size());
+  while (idx-- > 0) {
+    Slice val = entry[idx].GetValue(mempool);
+    if (!callback(callback_args, user_key_slice, entry[idx].tag, val)) break;
   }
   m_token_use_idle ? token->idle() : token->release();
 }
