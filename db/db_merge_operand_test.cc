@@ -5,6 +5,7 @@
 
 #include "db/db_test_util.h"
 #include "port/stack_trace.h"
+#include "rocksdb/memtablerep.h"
 #include "rocksdb/perf_context.h"
 #include "rocksdb/utilities/debug.h"
 #include "table/block_based/block_builder.h"
@@ -39,10 +40,39 @@ class LimitedStringAppendMergeOp : public StringAppendTESTOperator {
 };
 }  // anonymous namespace
 
+// When g_use_cspp is set, the *Impl test bodies below install the CSPP memtable
+// factory via MaybeInstallCSPPMemtable(). CSPP is only available when built
+// with WITH_CSPP_MEMTABLE=1 (which defines HAS_CSPP_MEMTABLE); otherwise the
+// helper is a no-op. The *Cspp cases use ScopedUseCSPP to set/reset the flag.
+// CSPP only participates in reads while data is still in the memtable, so we
+// exercise it from the merge-operand tests that read before flushing.
+bool g_use_cspp = false;
+
+void MaybeInstallCSPPMemtable(Options* options) {
+#ifdef HAS_CSPP_MEMTABLE
+  if (g_use_cspp) {
+    options->memtable_factory.reset(NewCSPPMemTableRepFactory(512 << 20));
+  }
+#else
+  (void)options;
+#endif
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+struct ScopedUseCSPP {
+  ScopedUseCSPP() { g_use_cspp = true; }
+  ~ScopedUseCSPP() { g_use_cspp = false; }
+};
+#endif
+
 class DBMergeOperandTest : public DBTestBase {
  public:
   DBMergeOperandTest()
       : DBTestBase("db_merge_operand_test", /*env_do_fsync=*/true) {}
+
+  void GetMergeOperandsBasicImpl();
+  void GetMergeOperandsLargeResultOptimizationImpl();
+  void GetMergeOperandsBaseDeletionInImmMemImpl();
 };
 
 TEST_F(DBMergeOperandTest, CacheEvictedMergeOperandReadAfterFreeBug) {
@@ -118,8 +148,9 @@ TEST_F(DBMergeOperandTest, FlushedMergeOperandReadAfterFreeBug) {
   flush_thread.join();
 }
 
-TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) {
+void DBMergeOperandTest::GetMergeOperandsBasicImpl() {
   Options options = CurrentOptions();
+  MaybeInstallCSPPMemtable(&options);
   // Use only the latest two merge operands.
   options.merge_operator = std::make_shared<LimitedStringAppendMergeOp>(2, ',');
   Reopen(options);
@@ -304,6 +335,15 @@ TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) {
   ASSERT_EQ(values[2], "am");
 }
 
+TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) { GetMergeOperandsBasicImpl(); }
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperandTest, GetMergeOperandsBasicCspp) {
+  ScopedUseCSPP cspp;
+  GetMergeOperandsBasicImpl();
+}
+#endif
+
 TEST_F(DBMergeOperandTest, BlobDBGetMergeOperandsBasic) {
   Options options = CurrentOptions();
   options.enable_blob_files = true;
@@ -389,13 +429,14 @@ TEST_F(DBMergeOperandTest, BlobDBGetMergeOperandsBasic) {
   ASSERT_EQ(values[3], "ed");
 }
 
-TEST_F(DBMergeOperandTest, GetMergeOperandsLargeResultOptimization) {
+void DBMergeOperandTest::GetMergeOperandsLargeResultOptimizationImpl() {
   // These constants are chosen to trigger the large result optimization
   // (pinning a bundle of `DBImpl` resources).
   const int kNumOperands = 1024;
   const int kOperandLen = 1024;
 
   Options options = CurrentOptions();
+  MaybeInstallCSPPMemtable(&options);
   options.merge_operator = MergeOperators::CreateStringAppendOperator();
   DestroyAndReopen(options);
 
@@ -430,10 +471,22 @@ TEST_F(DBMergeOperandTest, GetMergeOperandsLargeResultOptimization) {
   }
 }
 
-TEST_F(DBMergeOperandTest, GetMergeOperandsBaseDeletionInImmMem) {
+TEST_F(DBMergeOperandTest, GetMergeOperandsLargeResultOptimization) {
+  GetMergeOperandsLargeResultOptimizationImpl();
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperandTest, GetMergeOperandsLargeResultOptimizationCspp) {
+  ScopedUseCSPP cspp;
+  GetMergeOperandsLargeResultOptimizationImpl();
+}
+#endif
+
+void DBMergeOperandTest::GetMergeOperandsBaseDeletionInImmMemImpl() {
   // In this test, "k1" has a MERGE in a mutable memtable on top of a base
   // DELETE in an immutable memtable.
   Options opts = CurrentOptions();
+  MaybeInstallCSPPMemtable(&opts);
   opts.max_write_buffer_number = 10;
   opts.min_write_buffer_number_to_merge = 10;
   opts.merge_operator = MergeOperators::CreateDeprecatedPutOperator();
@@ -471,6 +524,17 @@ TEST_F(DBMergeOperandTest, GetMergeOperandsBaseDeletionInImmMem) {
     ASSERT_EQ("val", val);
   }
 }
+
+TEST_F(DBMergeOperandTest, GetMergeOperandsBaseDeletionInImmMem) {
+  GetMergeOperandsBaseDeletionInImmMemImpl();
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperandTest, GetMergeOperandsBaseDeletionInImmMemCspp) {
+  ScopedUseCSPP cspp;
+  GetMergeOperandsBaseDeletionInImmMemImpl();
+}
+#endif
 
 }  // namespace ROCKSDB_NAMESPACE
 
