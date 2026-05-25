@@ -11,6 +11,7 @@
 #if !defined(ROCKSDB_LITE)
 #include "test_util/sync_point.h"
 #endif
+#include "rocksdb/memtablerep.h"
 #include "rocksdb/merge_operator.h"
 #include "utilities/fault_injection_env.h"
 #include "utilities/merge_operators.h"
@@ -19,13 +20,40 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+// When g_use_cspp is set, the *Impl test bodies below install the CSPP memtable
+// factory via MaybeInstallCSPPMemtable(). CSPP is only available when built
+// with WITH_CSPP_MEMTABLE=1 (which defines HAS_CSPP_MEMTABLE); otherwise the
+// helper is a no-op. The *Cspp cases use ScopedUseCSPP to set/reset the flag.
+// CSPP only participates in reads while data is still in the memtable, so we
+// exercise it from the merge-operand tests that read before flushing.
+bool g_use_cspp = false;
+
+void MaybeInstallCSPPMemtable(Options* options) {
+#ifdef HAS_CSPP_MEMTABLE
+  if (g_use_cspp) {
+    options->memtable_factory.reset(NewCSPPMemTableRepFactory(512 << 20));
+  }
+#else
+  (void)options;
+#endif
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+struct ScopedUseCSPP {
+  ScopedUseCSPP() { g_use_cspp = true; }
+  ~ScopedUseCSPP() { g_use_cspp = false; }
+};
+#endif
+
 class DBMergeOperandTest : public DBTestBase {
  public:
   DBMergeOperandTest()
       : DBTestBase("/db_merge_operand_test", /*env_do_fsync=*/true) {}
+
+  void GetMergeOperandsBasicImpl();
 };
 
-TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) {
+void DBMergeOperandTest::GetMergeOperandsBasicImpl() {
   class LimitedStringAppendMergeOp : public StringAppendTESTOperator {
    public:
     LimitedStringAppendMergeOp(int limit, char delim)
@@ -47,6 +75,7 @@ TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) {
   };
 
   Options options;
+  MaybeInstallCSPPMemtable(&options);
   options.create_if_missing = true;
   // Use only the latest two merge operands.
   options.merge_operator = std::make_shared<LimitedStringAppendMergeOp>(2, ',');
@@ -231,6 +260,15 @@ TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) {
   ASSERT_EQ(values[1], "i");
   ASSERT_EQ(values[2], "am");
 }
+
+TEST_F(DBMergeOperandTest, GetMergeOperandsBasic) { GetMergeOperandsBasicImpl(); }
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperandTest, GetMergeOperandsBasicCspp) {
+  ScopedUseCSPP cspp;
+  GetMergeOperandsBasicImpl();
+}
+#endif
 
 }  // namespace ROCKSDB_NAMESPACE
 

@@ -8,6 +8,7 @@
 #include "db/db_test_util.h"
 #include "db/forward_iterator.h"
 #include "port/stack_trace.h"
+#include "rocksdb/memtablerep.h"
 #include "rocksdb/merge_operator.h"
 #include "util/random.h"
 #include "utilities/merge_operators.h"
@@ -33,11 +34,39 @@ class TestReadCallback : public ReadCallback {
   SequenceNumber snapshot_seq_;
 };
 
+// When g_use_cspp is set, the *Impl test bodies below install the CSPP memtable
+// factory via MaybeInstallCSPPMemtable(). CSPP is only available when built
+// with WITH_CSPP_MEMTABLE=1 (which defines HAS_CSPP_MEMTABLE); otherwise the
+// helper is a no-op. The *Cspp cases use ScopedUseCSPP to set/reset the flag.
+// CSPP only participates in reads while data is still in the memtable, so we
+// exercise it from the merge tests that read before flushing.
+bool g_use_cspp = false;
+
+void MaybeInstallCSPPMemtable(Options* options) {
+#ifdef HAS_CSPP_MEMTABLE
+  if (g_use_cspp) {
+    options->memtable_factory.reset(NewCSPPMemTableRepFactory(512 << 20));
+  }
+#else
+  (void)options;
+#endif
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+struct ScopedUseCSPP {
+  ScopedUseCSPP() { g_use_cspp = true; }
+  ~ScopedUseCSPP() { g_use_cspp = false; }
+};
+#endif
+
 // Test merge operator functionality.
 class DBMergeOperatorTest : public DBTestBase {
  public:
   DBMergeOperatorTest()
       : DBTestBase("/db_merge_operator_test", /*env_do_fsync=*/false) {}
+
+  void LimitMergeOperandsImpl();
+  void SnapshotCheckerAndReadCallbackImpl();
 
   std::string GetWithReadCallback(SnapshotChecker* snapshot_checker,
                                   const Slice& key,
@@ -60,7 +89,7 @@ class DBMergeOperatorTest : public DBTestBase {
   }
 };
 
-TEST_F(DBMergeOperatorTest, LimitMergeOperands) {
+void DBMergeOperatorTest::LimitMergeOperandsImpl() {
   class LimitedStringAppendMergeOp : public StringAppendTESTOperator {
    public:
     LimitedStringAppendMergeOp(int limit, char delim)
@@ -82,6 +111,7 @@ TEST_F(DBMergeOperatorTest, LimitMergeOperands) {
   };
 
   Options options;
+  MaybeInstallCSPPMemtable(&options);
   options.create_if_missing = true;
   // Use only the latest two merge operands.
   options.merge_operator =
@@ -133,6 +163,15 @@ TEST_F(DBMergeOperatorTest, LimitMergeOperands) {
   ASSERT_OK(db_->Get(ReadOptions(), "k4", &value));
   ASSERT_EQ(value, "cd,de");
 }
+
+TEST_F(DBMergeOperatorTest, LimitMergeOperands) { LimitMergeOperandsImpl(); }
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperatorTest, LimitMergeOperandsCspp) {
+  ScopedUseCSPP cspp;
+  LimitMergeOperandsImpl();
+}
+#endif
 
 TEST_F(DBMergeOperatorTest, MergeErrorOnRead) {
   Options options;
@@ -488,8 +527,9 @@ TEST_F(DBMergeOperatorTest, TailingIteratorMemtableUnrefedBySomeoneElse) {
 }
 #endif  // ROCKSDB_LITE
 
-TEST_F(DBMergeOperatorTest, SnapshotCheckerAndReadCallback) {
+void DBMergeOperatorTest::SnapshotCheckerAndReadCallbackImpl() {
   Options options = CurrentOptions();
+  MaybeInstallCSPPMemtable(&options);
   options.merge_operator = MergeOperators::CreateStringAppendOperator();
   DestroyAndReopen(options);
 
@@ -581,6 +621,17 @@ TEST_F(DBMergeOperatorTest, SnapshotCheckerAndReadCallback) {
   db_->ReleaseSnapshot(snapshot1);
   db_->ReleaseSnapshot(snapshot2);
 }
+
+TEST_F(DBMergeOperatorTest, SnapshotCheckerAndReadCallback) {
+  SnapshotCheckerAndReadCallbackImpl();
+}
+
+#ifdef HAS_CSPP_MEMTABLE
+TEST_F(DBMergeOperatorTest, SnapshotCheckerAndReadCallbackCspp) {
+  ScopedUseCSPP cspp;
+  SnapshotCheckerAndReadCallbackImpl();
+}
+#endif
 
 class PerConfigMergeOperatorPinningTest
     : public DBMergeOperatorTest,
