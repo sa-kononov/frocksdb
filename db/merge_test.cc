@@ -15,6 +15,7 @@
 #include "rocksdb/comparator.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
+#include "rocksdb/memtablerep.h"
 #include "rocksdb/merge_operator.h"
 #include "rocksdb/utilities/db_ttl.h"
 #include "rocksdb/wide_columns.h"
@@ -27,6 +28,22 @@ namespace ROCKSDB_NAMESPACE {
 bool use_compression;
 
 class MergeTest : public testing::Test {};
+
+// When g_use_cspp is set, OpenDb() installs the CSPP memtable factory. CSPP is
+// only available when built with WITH_CSPP_MEMTABLE=1 (which defines
+// HAS_CSPP_MEMTABLE); otherwise MaybeInstallCSPPMemtable is a no-op. The CSPP
+// test cases below use ScopedUseCSPP to set/reset the flag for their duration.
+bool g_use_cspp = false;
+
+void MaybeInstallCSPPMemtable(Options* options) {
+#ifdef HAS_CSPP_MEMTABLE
+  if (g_use_cspp) {
+    options->memtable_factory.reset(NewCSPPMemTableRepFactory(512 << 20));
+  }
+#else
+  (void)options;
+#endif
+}
 
 size_t num_merge_operator_calls;
 void resetNumMergeOperatorCalls() { num_merge_operator_calls = 0; }
@@ -104,6 +121,7 @@ std::shared_ptr<DB> OpenDb(const std::string& dbname, const bool ttl = false,
   options.merge_operator = std::make_shared<CountMergeOperator>();
   options.max_successive_merges = max_successive_merges;
   options.env = EnvMergeTest::GetInstance();
+  MaybeInstallCSPPMemtable(&options);
   EXPECT_OK(DestroyDB(dbname, Options()));
   Status s;
   if (ttl) {
@@ -612,6 +630,44 @@ TEST_F(MergeTest, MergeWithCompactionAndFlush) {
   }
   ASSERT_OK(DestroyDB(dbname, Options()));
 }
+
+#ifdef HAS_CSPP_MEMTABLE
+// The same merge scenarios as above, but against the CSPP memtable. Built only
+// with WITH_CSPP_MEMTABLE=1. ScopedUseCSPP makes OpenDb() install the CSPP
+// factory for the test's duration and resets the flag even on an early return
+// from an assertion.
+namespace {
+struct ScopedUseCSPP {
+  ScopedUseCSPP() { g_use_cspp = true; }
+  ~ScopedUseCSPP() { g_use_cspp = false; }
+};
+}  // namespace
+
+TEST_F(MergeTest, MergeDbTestCspp) {
+  ScopedUseCSPP cspp;
+  runTest(test::PerThreadDBPath("merge_testdb_cspp"));
+}
+
+TEST_F(MergeTest, MergeDbTtlTestCspp) {
+  ScopedUseCSPP cspp;
+  runTest(test::PerThreadDBPath("merge_testdbttl_cspp"),
+          true);  // Run test on TTL database
+}
+
+TEST_F(MergeTest, MergeWithCompactionAndFlushCspp) {
+  ScopedUseCSPP cspp;
+  const std::string dbname =
+      test::PerThreadDBPath("merge_with_compaction_and_flush_cspp");
+  {
+    auto db = OpenDb(dbname);
+    {
+      MergeBasedCounters counters(db, 0);
+      testCountersWithFlushAndCompaction(counters, db.get());
+    }
+  }
+  ASSERT_OK(DestroyDB(dbname, Options()));
+}
+#endif  // HAS_CSPP_MEMTABLE
 
 TEST_F(MergeTest, FullMergeV3FallbackNewValue) {
   // Test that the default FullMergeV3 implementation correctly handles the case

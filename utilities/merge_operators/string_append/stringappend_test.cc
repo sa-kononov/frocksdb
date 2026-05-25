@@ -20,6 +20,7 @@
 
 #include "port/stack_trace.h"
 #include "rocksdb/db.h"
+#include "rocksdb/memtablerep.h"
 #include "rocksdb/merge_operator.h"
 #include "rocksdb/utilities/db_ttl.h"
 #include "test_util/testharness.h"
@@ -33,6 +34,24 @@ namespace ROCKSDB_NAMESPACE {
 const std::string kDbName = test::PerThreadDBPath("stringappend_test");
 
 namespace {
+// When the test parameter selects CSPP, the Open* helpers install the CSPP
+// memtable factory. CSPP is only available when built with WITH_CSPP_MEMTABLE=1
+// (which defines HAS_CSPP_MEMTABLE); otherwise this is a no-op and the suite
+// runs on the default skiplist only. Set per-test in SetUp() before the test
+// body calls OpenDb(); gtest runs tests serially, so a file-scope flag is safe.
+bool g_use_cspp = false;
+
+void MaybeInstallCSPPMemtable(Options* options) {
+#ifdef HAS_CSPP_MEMTABLE
+  if (g_use_cspp) {
+    // Cap sized generously for the test's working set; VA reservation is cheap.
+    options->memtable_factory.reset(NewCSPPMemTableRepFactory(512 << 20));
+  }
+#else
+  (void)options;
+#endif
+}
+
 // OpenDb opens a (possibly new) rocksdb database with a StringAppendOperator
 std::shared_ptr<DB> OpenNormalDb(const std::string& delim) {
   DB* db;
@@ -45,6 +64,7 @@ std::shared_ptr<DB> OpenNormalDb(const std::string& delim) {
     mergeOperator = new StringAppendOperator(delim);
   }
   options.merge_operator.reset(mergeOperator);
+  MaybeInstallCSPPMemtable(&options);
   EXPECT_OK(DB::Open(options, kDbName, &db));
   return std::shared_ptr<DB>(db);
 }
@@ -61,6 +81,7 @@ std::shared_ptr<DB> OpenTtlDb(const std::string& delim) {
     mergeOperator = new StringAppendTESTOperator(delim);
   }
   options.merge_operator.reset(mergeOperator);
+  MaybeInstallCSPPMemtable(&options);
   EXPECT_OK(DBWithTTL::Open(options, kDbName, &db, 123456));
   return std::shared_ptr<DB>(db);
 }
@@ -118,9 +139,12 @@ class StringLists {
   ReadOptions get_option_;
 };
 
-// The class for unit-testing
-class StringAppendOperatorTest : public testing::Test,
-                                 public ::testing::WithParamInterface<bool> {
+// The class for unit-testing.
+// Parameter: <use_ttl, use_cspp>. use_cspp is only ever true when built with
+// WITH_CSPP_MEMTABLE=1 (see the instantiation below).
+class StringAppendOperatorTest
+    : public testing::Test,
+      public ::testing::WithParamInterface<std::tuple<bool, bool>> {
  public:
   StringAppendOperatorTest() {
     EXPECT_OK(
@@ -128,13 +152,17 @@ class StringAppendOperatorTest : public testing::Test,
   }
 
   void SetUp() override {
-    bool if_use_ttl = GetParam();
+    g_use_cspp = std::get<1>(GetParam());
+    const char* memtable = g_use_cspp ? " (CSPP memtable)" : "";
+    bool if_use_ttl = std::get<0>(GetParam());
     if (if_use_ttl) {
-      fprintf(stderr, "Running tests with ttl db and generic operator.\n");
+      fprintf(stderr, "Running tests with ttl db and generic operator%s.\n",
+              memtable);
       StringAppendOperatorTest::SetOpenDbFunction(&OpenTtlDb);
       return;
     }
-    fprintf(stderr, "Running tests with regular db and operator.\n");
+    fprintf(stderr, "Running tests with regular db and operator%s.\n",
+            memtable);
     StringAppendOperatorTest::SetOpenDbFunction(&OpenNormalDb);
   }
 
@@ -627,8 +655,15 @@ TEST_P(StringAppendOperatorTest, SimpleTestNullDelimiter) {
   ASSERT_EQ(res, checker);
 }
 
-INSTANTIATE_TEST_CASE_P(StringAppendOperatorTest, StringAppendOperatorTest,
-                        testing::Bool());
+INSTANTIATE_TEST_CASE_P(
+    StringAppendOperatorTest, StringAppendOperatorTest,
+    ::testing::Combine(::testing::Bool(),  // use_ttl
+#ifdef HAS_CSPP_MEMTABLE
+                       ::testing::Bool()  // use_cspp: {skiplist, CSPP}
+#else
+                       ::testing::Values(false)  // skiplist only
+#endif
+                       ));
 
 }  // namespace ROCKSDB_NAMESPACE
 
